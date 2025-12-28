@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+Fault-Tolerant Data Processing System
 
-## Getting Started
+This is a Fault-Tolerant Data Processing System built with Next.js and TypeScript. It is designed to ingest unreliable data from multiple clients, normalize it, deduplicate events using content-based hashing, and handle partial failures gracefully.
 
-First, run the development server:
+🚀 Getting Started
 
-```bash
+First, install the dependencies:
+
+npm install
+
+# or
+
+yarn install
+
+Then, run the development server:
+
 npm run dev
+
 # or
+
 yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000 with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The application includes a built-in dashboard where you can manually send events, toggle failure simulations, and view live aggregated stats.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+📋 Assignment Deliverables & Design Decisions
 
-## Learn More
+Below are the specific answers to the design questions required for the assignment.
 
-To learn more about Next.js, take a look at the following resources:
+1. What assumptions did you make?
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Identity via Content: Since clients do not provide a guaranteed unique ID, I assumed that Identity = Content. If two JSON payloads contain the exact same data (even if keys are in a different order), they are treated as the same event.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Schema Flexibility: I assumed that clients might use various keys for the same data concepts. The normalization layer heuristically maps keys like amt, value, or cost to a standardized amount field.
 
-## Deploy on Vercel
+Persistence: Given the 60-minute constraint, I assumed an In-Memory Singleton Store (globalThis) is acceptable to demonstrate the architecture and logic, rather than setting up a persistent external database like PostgreSQL or MongoDB.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+2. How does your system prevent double counting?
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+I implemented Content-Based Deduplication using cryptographic hashing. The process is as follows:
+
+Canonicalization: When an event arrives, the JSON keys are sorted alphabetically. This ensures that { "a": 1, "b": 2 } generates the same signature as { "b": 2, "a": 1 }.
+
+Hashing: A SHA-256 hash is generated from this stable string string.
+
+Lookup: Before processing, this hash is checked against a Set of previously processed hashes.
+
+Action: If the hash exists, the system returns a 200 OK (Idempotent success) but internally skips the aggregation logic.
+
+3. What happens if the database fails mid-request?
+
+The system is designed to maintain Atomicity to prevent "ghost records":
+
+The system first normalizes and validates the incoming data.
+
+It then attempts the write operation (this is where the "Simulate Failure" toggle triggers an error).
+
+Crucially, the "Deduplication Hash" is only saved to the tracking Set after a successful write.
+
+Result: If the database fails mid-request, the hash is never saved. When the client retries the request later, the Deduplication Check sees it as "new" and allows it to proceed. This prevents valid data from being permanently rejected as a duplicate due to a previous failed attempt.
+
+4. What would break first at scale?
+
+Memory (RAM) is the primary bottleneck in this implementation.
+
+The Problem: The current implementation stores every normalized event and every deduplication hash in the Node.js process memory. As the volume of events grows, the application will eventually hit the V8 Heap Limit and crash with an Out Of Memory (OOM) error.
+
+The Distributed Problem: If this application were deployed across multiple server instances (e.g., Kubernetes pods), the local in-memory sets would not share state. Instance A would not know that Instance B already processed a specific event, leading to potential duplicates.
+
+The Fix:
+
+Move the deduplication state (hashes) to a shared, high-performance Key-Value store like Redis.
+
+Move the event storage to a persistent SQL database or Data Warehouse (e.g., Snowflake, BigQuery).
